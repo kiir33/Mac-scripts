@@ -1,0 +1,125 @@
+# Covalent OJT — iTerm2 dev layout (source from ~/.zshrc)
+# Usage: start_dev_session
+
+start_dev_session() {
+  PROJECT_DIR="$PWD"
+  STATE_DIR="$HOME/.covalent-dev-sessions"
+  SESSION_KEY="$(printf '%s' "$PROJECT_DIR" | shasum -a 256 | awk '{print $1}')"
+
+  mkdir -p "$STATE_DIR"
+
+  WINDOW_ID="$(osascript <<EOF
+tell application "iTerm2"
+    -- 1. Create the window and capture the first session (Top-Left)
+    set newWindow to (create window with default profile)
+    set sessionTopLeft to current session of newWindow
+
+    -- 2. Setup Top-Left (Rails Server)
+    tell sessionTopLeft
+        write text "cd \"$PROJECT_DIR\" && bundle exec rails server"
+
+        -- Split vertically to create the right column
+        set sessionTopRight to (split vertically with default profile)
+    end tell
+
+    -- 3. Setup Top-Right (Shakapacker)
+    tell sessionTopRight
+        write text "cd \"$PROJECT_DIR\" && bin/shakapacker-dev-server"
+
+        -- Split the right side horizontally to create Bottom-Right
+        set sessionBottomRight to (split horizontally with default profile)
+    end tell
+
+    -- 4. Setup Bottom-Right (clean terminal)
+    tell sessionBottomRight
+        write text "cd \"$PROJECT_DIR\""
+        write text "clear"
+    end tell
+
+    -- 5. Go back to Top-Left and split horizontally to create Bottom-Left (Rails)
+    tell sessionTopLeft
+        set sessionBottomLeft to (split horizontally with default profile)
+    end tell
+
+    -- 6. Setup Bottom-Left (Sidekiq)
+    tell sessionBottomLeft
+        write text "cd \"$PROJECT_DIR\" && bundle exec sidekiq"
+    end tell
+
+    return id of newWindow
+end tell
+EOF
+)"
+
+  printf '%s\n' "$WINDOW_ID" > "$STATE_DIR/$SESSION_KEY.window"
+
+  echo "Development session started for $PROJECT_DIR."
+}
+
+stop_dev_session() {
+  PROJECT_DIR="$PWD"
+  STATE_DIR="$HOME/.covalent-dev-sessions"
+  SESSION_KEY="$(printf '%s' "$PROJECT_DIR" | shasum -a 256 | awk '{print $1}')"
+  STATE_FILE="$STATE_DIR/$SESSION_KEY.window"
+
+  if [ ! -f "$STATE_FILE" ]; then
+    echo "No tracked dev session found for $PROJECT_DIR."
+    return 1
+  fi
+
+  WINDOW_ID="$(tr -d '\n' < "$STATE_FILE")"
+
+  osascript - "$WINDOW_ID" <<'APPLESCRIPT'
+on run argv
+    set targetWindowId to (item 1 of argv) as integer
+
+tell application "iTerm2"
+    try
+        set targetWindow to first window whose id is targetWindowId
+    on error
+        return "missing-window"
+    end try
+
+    set sessionList to {}
+
+    repeat with aTab in tabs of targetWindow
+        repeat with sess in sessions of aTab
+            copy sess to end of sessionList
+        end repeat
+    end repeat
+
+    repeat with sess in sessionList
+        try
+            tell sess
+                -- Ctrl+C (ETX) stops running commands.
+                write text (ASCII character 3)
+            end tell
+        end try
+    end repeat
+
+    delay 0.3
+
+    repeat with i from (count of sessionList) to 1 by -1
+        try
+            tell item i of sessionList
+                -- Ctrl+D (EOT) exits the shell so split panes close.
+                write text (ASCII character 4)
+            end tell
+        end try
+    end repeat
+
+    delay 0.5
+    try
+        close targetWindow
+    end try
+end tell
+end run
+APPLESCRIPT
+
+  rm -f "$STATE_FILE"
+}
+
+restart_dev_session() {
+  stop_dev_session || true
+  start_dev_session
+}
